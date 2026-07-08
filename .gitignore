@@ -1,0 +1,11 @@
+# Binaries
+/ballast
+/bin/
+*.exe
+
+# Test / profiling output
+*.test
+*.out
+
+# Append-only log
+*.aof
