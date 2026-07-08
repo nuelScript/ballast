@@ -8,27 +8,22 @@ import (
 	"strconv"
 )
 
-// ErrInvalidSyntax means the bytes on the wire were not valid RESP. Once seen,
-// the stream is desynced and the connection should be dropped.
+// ErrInvalidSyntax means the stream is desynced and the connection must be dropped.
 var ErrInvalidSyntax = errors.New("resp: invalid syntax")
 
-// maxBulkLen caps a single bulk string, matching the ceiling Redis uses.
 const maxBulkLen = 512 * 1024 * 1024
 
-// Reader reads client commands using the RESP protocol. It accepts both the
-// array-of-bulk-strings form real clients send and the plain inline form that
-// is handy from netcat or telnet.
+// Reader accepts both the array-of-bulk-strings form real clients send and the
+// plain inline form handy from netcat.
 type Reader struct {
 	r *bufio.Reader
 }
 
-// NewReader wraps rd with buffering.
 func NewReader(rd io.Reader) *Reader {
 	return &Reader{r: bufio.NewReader(rd)}
 }
 
-// ReadCommand reads one command and returns its arguments; the first element is
-// the command name. It returns io.EOF when the client disconnects cleanly.
+// ReadCommand returns io.EOF when the client disconnects cleanly.
 func (r *Reader) ReadCommand() ([][]byte, error) {
 	b, err := r.r.ReadByte()
 	if err != nil {
@@ -37,7 +32,6 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 	if b == '*' {
 		return r.readArrayCommand()
 	}
-	// Inline command: put the byte back and read the whole line.
 	if err := r.r.UnreadByte(); err != nil {
 		return nil, err
 	}
@@ -50,7 +44,6 @@ func (r *Reader) readArrayCommand() ([][]byte, error) {
 		return nil, err
 	}
 	if n <= 0 {
-		// Empty or null array; caller just moves on to the next command.
 		return [][]byte{}, nil
 	}
 	args := make([][]byte, 0, n)
@@ -77,14 +70,12 @@ func (r *Reader) readBulk() ([]byte, error) {
 		return nil, err
 	}
 	if n < 0 {
-		return nil, nil // null bulk string
+		return nil, nil
 	}
 	if n > maxBulkLen {
 		return nil, fmt.Errorf("%w: bulk length %d too large", ErrInvalidSyntax, n)
 	}
-	// Read the payload plus its trailing CRLF in one shot. This allocates a
-	// fresh slice per argument, so callers may retain it without aliasing the
-	// reader's internal buffer.
+	// Fresh slice per argument, so callers may retain it without aliasing the buffer.
 	buf := make([]byte, n+2)
 	if _, err := io.ReadFull(r.r, buf); err != nil {
 		return nil, err
@@ -95,7 +86,6 @@ func (r *Reader) readBulk() ([]byte, error) {
 	return buf[:n], nil
 }
 
-// readInteger reads a length/count prefix line and parses it as an integer.
 func (r *Reader) readInteger() (int64, error) {
 	line, err := r.readLine()
 	if err != nil {
@@ -108,9 +98,7 @@ func (r *Reader) readInteger() (int64, error) {
 	return n, nil
 }
 
-// readLine reads through the next '\n' and returns the line without its
-// terminator. A preceding '\r' is stripped when present, so lone-LF input from
-// netcat is tolerated alongside proper CRLF framing.
+// readLine strips an optional trailing '\r', so lone-LF input from netcat works.
 func (r *Reader) readLine() ([]byte, error) {
 	line, err := r.r.ReadBytes('\n')
 	if err != nil {
@@ -131,7 +119,6 @@ func (r *Reader) readInlineCommand() ([][]byte, error) {
 	return splitInline(line), nil
 }
 
-// splitInline splits a line on runs of spaces, dropping empty fields.
 func splitInline(line []byte) [][]byte {
 	var args [][]byte
 	i := 0

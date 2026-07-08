@@ -7,24 +7,18 @@ import (
 	"github.com/nuelScript/ballast/internal/resp"
 )
 
-// errQuit is returned by a handler to signal the connection should close.
 var errQuit = errors.New("client quit")
 
-// Store is the storage engine the server serves from.
 type Store interface {
 	Get(key string) ([]byte, bool, error)
 	Set(key string, value []byte) error
 	Delete(keys ...string) (int, error)
 }
 
-// merger is optionally implemented by a Store that can compact itself.
 type merger interface {
 	Merge() error
 }
 
-// handleCommand executes one parsed command against the store and writes its
-// reply to w. A returned error other than errQuit means the reply could not be
-// written.
 func handleCommand(w *resp.Writer, store Store, args [][]byte) error {
 	if len(args) == 0 {
 		return nil

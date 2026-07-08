@@ -9,20 +9,15 @@ import (
 	"github.com/nuelScript/ballast/internal/resp"
 )
 
-// Server is a minimal RESP server backed by a storage engine.
 type Server struct {
 	addr  string
 	store Store
 }
 
-// New returns a Server that will listen on addr (e.g. ":6379") and serve from
-// store.
 func New(addr string, store Store) *Server {
 	return &Server{addr: addr, store: store}
 }
 
-// ListenAndServe binds the configured address and serves until the listener
-// fails. It blocks.
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -31,8 +26,7 @@ func (s *Server) ListenAndServe() error {
 	return s.Serve(ln)
 }
 
-// Serve accepts connections on ln until it is closed. It blocks and takes
-// ownership of ln, closing it on return.
+// Serve takes ownership of ln and closes it on return.
 func (s *Server) Serve(ln net.Listener) error {
 	defer ln.Close()
 	log.Printf("ballast listening on %s", ln.Addr())
@@ -52,8 +46,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	for {
 		args, err := r.ReadCommand()
 		if err != nil {
-			// A protocol error desyncs the stream: report it, then drop the
-			// client. A clean disconnect just ends the loop silently.
+			// A protocol error desyncs the stream, so report it and drop the client.
 			if errors.Is(err, resp.ErrInvalidSyntax) {
 				w.WriteError("ERR Protocol error")
 				w.Flush()
@@ -64,7 +57,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		if err := handleCommand(w, s.store, args); err != nil {
 			if !errors.Is(err, errQuit) {
-				return // connection is broken; nothing more to do
+				return
 			}
 			w.Flush()
 			return

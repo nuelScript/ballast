@@ -9,12 +9,9 @@ import (
 	"os"
 )
 
-// On-disk record layout (little-endian):
+// Record layout, little-endian. The CRC covers every byte after it.
 //
-//	| crc32 (4) | tstamp (8) | kind (1) | keySize (4) | valueSize (4) | key | value |
-//
-// The CRC covers every byte after it, so a torn or bit-rotted record is caught
-// on read. A delete is a record with kind == kindTombstone and no value.
+//	crc32(4) | tstamp(8) | kind(1) | keySize(4) | valueSize(4) | key | value
 const (
 	headerSize = 4 + 8 + 1 + 4 + 4
 
@@ -22,7 +19,6 @@ const (
 	kindTombstone byte = 1
 )
 
-// encodeRecord serializes one record into a fresh byte slice.
 func encodeRecord(kind byte, tstamp int64, key, value []byte) []byte {
 	buf := make([]byte, headerSize+len(key)+len(value))
 	binary.LittleEndian.PutUint64(buf[4:], uint64(tstamp))
@@ -35,19 +31,17 @@ func encodeRecord(kind byte, tstamp int64, key, value []byte) []byte {
 	return buf
 }
 
-// scanned is one decoded record's metadata, handed to the scan callback.
 type scanned struct {
 	key       []byte
 	kind      byte
 	tstamp    int64
-	valuePos  int64 // absolute offset of the value bytes within the file
+	valuePos  int64
 	valueSize uint32
 }
 
-// scanFile reads records from f in order, invoking visit for each valid one. It
-// returns the byte offset at which valid data ends: a clean EOF, a record
-// truncated by a crash mid-write, or the first CRC mismatch all stop the scan
-// there. That offset is where the next append must begin.
+// scanFile returns the offset where valid data ends: a clean EOF, a tail
+// truncated by a crash, or the first CRC mismatch all stop the scan there, which
+// is where the next append must begin.
 func scanFile(f *os.File, visit func(scanned)) (int64, error) {
 	r := bufio.NewReader(f)
 	var offset int64
@@ -68,7 +62,7 @@ func scanFile(f *os.File, visit func(scanned)) (int64, error) {
 		body := make([]byte, int(keySize)+int(valueSize))
 		if _, err := io.ReadFull(r, body); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return offset, nil // truncated tail from a crash mid-append
+				return offset, nil
 			}
 			return offset, err
 		}
@@ -77,7 +71,7 @@ func scanFile(f *os.File, visit func(scanned)) (int64, error) {
 		sum.Write(header[4:])
 		sum.Write(body)
 		if sum.Sum32() != crc {
-			return offset, nil // corrupt record; treat as the end of valid data
+			return offset, nil
 		}
 
 		visit(scanned{
