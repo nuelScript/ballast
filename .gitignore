@@ -10,3 +10,6 @@
 # Storage engine data
 /ballast-data/
 *.data
+*.sst
+*.tmp
+wal.log

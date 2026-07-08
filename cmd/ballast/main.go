@@ -4,7 +4,7 @@ import (
 	"flag"
 	"log"
 
-	"github.com/nuelScript/ballast/internal/bitcask"
+	"github.com/nuelScript/ballast/internal/lsm"
 	"github.com/nuelScript/ballast/internal/server"
 )
 
@@ -13,7 +13,7 @@ func main() {
 	dir := flag.String("dir", "ballast-data", "data directory for the storage engine")
 	flag.Parse()
 
-	db, err := bitcask.Open(*dir)
+	db, err := lsm.Open(*dir)
 	if err != nil {
 		log.Fatal(err)
 	}

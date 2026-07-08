@@ -10,11 +10,12 @@ go run ./cmd/ballast                       # :6379, data in ./ballast-data
 go run ./cmd/ballast -addr :7000 -dir /var/lib/ballast
 ```
 
-Values are stored in append-only segment files on disk; only an index of
-`key → file location` is kept in memory, so the dataset can outgrow RAM. Records
-are CRC-checked, and data survives a restart (including `kill -9`). `COMPACT`
-rewrites the live records into a fresh segment to reclaim space held by
-overwritten and deleted keys.
+Writes go to a write-ahead log and an in-memory memtable; when the memtable
+fills it is flushed to an immutable, sorted SSTable on disk. Reads check the
+memtable, then the SSTables newest-first, using a per-table bloom filter to skip
+those that cannot hold the key. Data survives a restart (including `kill -9`),
+and `COMPACT` merges the SSTables to reclaim space from overwritten and deleted
+keys.
 
 ## Try it
 

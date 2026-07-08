@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuelScript/ballast/internal/bitcask"
+	"github.com/nuelScript/ballast/internal/lsm"
 )
 
 // dialTestServer starts a Server on a random port and returns a connected
 // client with a buffered reader. Everything is torn down via t.Cleanup.
 func dialTestServer(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	db, err := bitcask.Open(t.TempDir())
+	db, err := lsm.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
