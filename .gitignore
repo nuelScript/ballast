@@ -7,5 +7,6 @@
 *.test
 *.out
 
-# Append-only log
-*.aof
+# Storage engine data
+/ballast-data/
+*.data

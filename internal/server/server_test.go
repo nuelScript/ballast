@@ -8,22 +8,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nuelScript/ballast/internal/engine"
+	"github.com/nuelScript/ballast/internal/bitcask"
 )
 
 // dialTestServer starts a Server on a random port and returns a connected
 // client with a buffered reader. Everything is torn down via t.Cleanup.
 func dialTestServer(t *testing.T) (net.Conn, *bufio.Reader) {
 	t.Helper()
-	eng, err := engine.Open("") // in-memory, no log file
+	db, err := bitcask.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { db.Close() })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	go New("", eng).Serve(ln)
+	go New("", db).Serve(ln)
 	t.Cleanup(func() { ln.Close() })
 
 	conn, err := net.Dial("tcp", ln.Addr().String())

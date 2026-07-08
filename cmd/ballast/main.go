@@ -4,22 +4,22 @@ import (
 	"flag"
 	"log"
 
-	"github.com/nuelScript/ballast/internal/engine"
+	"github.com/nuelScript/ballast/internal/bitcask"
 	"github.com/nuelScript/ballast/internal/server"
 )
 
 func main() {
 	addr := flag.String("addr", ":6379", "address to listen on")
-	aofPath := flag.String("aof", "ballast.aof", "append-only log file (empty to disable persistence)")
+	dir := flag.String("dir", "ballast-data", "data directory for the storage engine")
 	flag.Parse()
 
-	eng, err := engine.Open(*aofPath)
+	db, err := bitcask.Open(*dir)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer eng.Close()
+	defer db.Close()
 
-	if err := server.New(*addr, eng).ListenAndServe(); err != nil {
+	if err := server.New(*addr, db).ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

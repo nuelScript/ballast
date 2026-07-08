@@ -6,20 +6,19 @@ import (
 	"log"
 	"net"
 
-	"github.com/nuelScript/ballast/internal/engine"
 	"github.com/nuelScript/ballast/internal/resp"
 )
 
 // Server is a minimal RESP server backed by a storage engine.
 type Server struct {
-	addr   string
-	engine *engine.Engine
+	addr  string
+	store Store
 }
 
 // New returns a Server that will listen on addr (e.g. ":6379") and serve from
-// eng.
-func New(addr string, eng *engine.Engine) *Server {
-	return &Server{addr: addr, engine: eng}
+// store.
+func New(addr string, store Store) *Server {
+	return &Server{addr: addr, store: store}
 }
 
 // ListenAndServe binds the configured address and serves until the listener
@@ -63,7 +62,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		if err := handleCommand(w, s.engine, args); err != nil {
+		if err := handleCommand(w, s.store, args); err != nil {
 			if !errors.Is(err, errQuit) {
 				return // connection is broken; nothing more to do
 			}

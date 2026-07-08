@@ -4,16 +4,28 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/nuelScript/ballast/internal/engine"
 	"github.com/nuelScript/ballast/internal/resp"
 )
 
 // errQuit is returned by a handler to signal the connection should close.
 var errQuit = errors.New("client quit")
 
-// handleCommand executes one parsed command against eng and writes its reply to
-// w. A returned error other than errQuit means the reply could not be written.
-func handleCommand(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
+// Store is the storage engine the server serves from.
+type Store interface {
+	Get(key string) ([]byte, bool, error)
+	Set(key string, value []byte) error
+	Delete(keys ...string) (int, error)
+}
+
+// merger is optionally implemented by a Store that can compact itself.
+type merger interface {
+	Merge() error
+}
+
+// handleCommand executes one parsed command against the store and writes its
+// reply to w. A returned error other than errQuit means the reply could not be
+// written.
+func handleCommand(w *resp.Writer, store Store, args [][]byte) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -23,11 +35,13 @@ func handleCommand(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
 	case "ECHO":
 		return cmdEcho(w, args)
 	case "SET":
-		return cmdSet(w, eng, args)
+		return cmdSet(w, store, args)
 	case "GET":
-		return cmdGet(w, eng, args)
+		return cmdGet(w, store, args)
 	case "DEL":
-		return cmdDel(w, eng, args)
+		return cmdDel(w, store, args)
+	case "COMPACT":
+		return cmdCompact(w, store)
 	case "COMMAND":
 		// redis-cli probes COMMAND DOCS on connect; an empty array keeps it happy.
 		return w.WriteArray(0)
@@ -55,28 +69,31 @@ func cmdEcho(w *resp.Writer, args [][]byte) error {
 	return w.WriteBulk(args[1])
 }
 
-func cmdSet(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
+func cmdSet(w *resp.Writer, store Store, args [][]byte) error {
 	if len(args) != 3 {
 		return w.WriteError("ERR wrong number of arguments for 'set' command")
 	}
-	if err := eng.Set(string(args[1]), args[2]); err != nil {
+	if err := store.Set(string(args[1]), args[2]); err != nil {
 		return w.WriteError("ERR " + err.Error())
 	}
 	return w.WriteSimpleString("OK")
 }
 
-func cmdGet(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
+func cmdGet(w *resp.Writer, store Store, args [][]byte) error {
 	if len(args) != 2 {
 		return w.WriteError("ERR wrong number of arguments for 'get' command")
 	}
-	v, ok := eng.Get(string(args[1]))
+	v, ok, err := store.Get(string(args[1]))
+	if err != nil {
+		return w.WriteError("ERR " + err.Error())
+	}
 	if !ok {
 		return w.WriteNull()
 	}
 	return w.WriteBulk(v)
 }
 
-func cmdDel(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
+func cmdDel(w *resp.Writer, store Store, args [][]byte) error {
 	if len(args) < 2 {
 		return w.WriteError("ERR wrong number of arguments for 'del' command")
 	}
@@ -84,9 +101,20 @@ func cmdDel(w *resp.Writer, eng *engine.Engine, args [][]byte) error {
 	for _, k := range args[1:] {
 		keys = append(keys, string(k))
 	}
-	n, err := eng.Delete(keys...)
+	n, err := store.Delete(keys...)
 	if err != nil {
 		return w.WriteError("ERR " + err.Error())
 	}
 	return w.WriteInteger(int64(n))
+}
+
+func cmdCompact(w *resp.Writer, store Store) error {
+	m, ok := store.(merger)
+	if !ok {
+		return w.WriteError("ERR compaction not supported")
+	}
+	if err := m.Merge(); err != nil {
+		return w.WriteError("ERR " + err.Error())
+	}
+	return w.WriteSimpleString("OK")
 }

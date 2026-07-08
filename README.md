@@ -6,13 +6,15 @@ Point any Redis client at it.
 ## Run
 
 ```sh
-go run ./cmd/ballast                       # :6379, log at ./ballast.aof
-go run ./cmd/ballast -addr :7000
-go run ./cmd/ballast -aof ""               # in-memory, no persistence
+go run ./cmd/ballast                       # :6379, data in ./ballast-data
+go run ./cmd/ballast -addr :7000 -dir /var/lib/ballast
 ```
 
-Writes are appended to an on-disk log before they are acknowledged, and the log
-is replayed on startup — so data survives a restart (including `kill -9`).
+Values are stored in append-only segment files on disk; only an index of
+`key → file location` is kept in memory, so the dataset can outgrow RAM. Records
+are CRC-checked, and data survives a restart (including `kill -9`). `COMPACT`
+rewrites the live records into a fresh segment to reclaim space held by
+overwritten and deleted keys.
 
 ## Try it
 
@@ -30,7 +32,7 @@ OK
 
 ## Commands
 
-`PING`, `ECHO`, `SET`, `GET`, `DEL`, `QUIT`.
+`PING`, `ECHO`, `SET`, `GET`, `DEL`, `COMPACT`, `QUIT`.
 
 ## Test
 
