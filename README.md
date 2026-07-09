@@ -33,7 +33,10 @@ OK
 
 ## Commands
 
-`PING`, `ECHO`, `SET`, `GET`, `DEL`, `COMPACT`, `QUIT`.
+`PING`, `ECHO`, `SET`, `GET`, `DEL`, `RANGE start end [LIMIT n]`, `COMPACT`, `QUIT`.
+
+`RANGE` returns the key/value pairs with `start <= key <= end`, in key order —
+merged across the memtable and every SSTable.
 
 ## Test
 

@@ -225,6 +225,44 @@ func (s *sstable) get(key string) (kvEntry, bool, error) {
 	return kvEntry{}, false, nil
 }
 
+// rangeEntries returns the entries with start <= key <= end, in key order. It
+// reads only the blocks the sparse index says could hold that range.
+func (s *sstable) rangeEntries(start, end string) ([]kvEntry, error) {
+	if len(s.index) == 0 {
+		return nil, nil
+	}
+	lo := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > start }) - 1
+	if lo < 0 {
+		lo = 0
+	}
+	startOff := s.index[lo].offset
+	endOff := s.dataEnd
+	if hi := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > end }); hi < len(s.index) {
+		endOff = s.index[hi].offset
+	}
+	if endOff <= startOff {
+		return nil, nil
+	}
+
+	buf := make([]byte, endOff-startOff)
+	if _, err := s.f.ReadAt(buf, startOff); err != nil {
+		return nil, err
+	}
+	var out []kvEntry
+	for off := 0; off < len(buf); {
+		e, next := decodeEntry(buf, off)
+		off = next
+		if e.key < start {
+			continue
+		}
+		if e.key > end {
+			break
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
 func (s *sstable) all() ([]kvEntry, error) {
 	if s.dataEnd == 0 {
 		return nil, nil

@@ -46,3 +46,14 @@ func (m *memtable) sorted() []kvEntry {
 	slices.SortFunc(out, func(a, b kvEntry) int { return strings.Compare(a.key, b.key) })
 	return out
 }
+
+func (m *memtable) rangeEntries(start, end string) []kvEntry {
+	var out []kvEntry
+	for _, e := range m.data {
+		if e.key >= start && e.key <= end {
+			out = append(out, e)
+		}
+	}
+	slices.SortFunc(out, func(a, b kvEntry) int { return strings.Compare(a.key, b.key) })
+	return out
+}

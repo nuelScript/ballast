@@ -201,6 +201,57 @@ func TestMergeReclaimsSpaceAndKeepsData(t *testing.T) {
 	db.Close()
 }
 
+func TestRange(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.memLimit = 256 // spread data across SSTables + memtable
+	for i := 0; i < 60; i++ {
+		db.Set(fmt.Sprintf("k%02d", i), []byte(fmt.Sprintf("v%02d", i)))
+	}
+	db.Set("k10", []byte("newer")) // overwrite: newest (memtable) must win
+	db.Delete("k20")               // tombstone must be skipped in results
+
+	got, err := db.Range("k08", "k12", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []KV{
+		{"k08", []byte("v08")},
+		{"k09", []byte("v09")},
+		{"k10", []byte("newer")},
+		{"k11", []byte("v11")},
+		{"k12", []byte("v12")},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d pairs, want %d: %v", len(got), len(want), got)
+	}
+	for i, kv := range got {
+		if kv.Key != want[i].Key || string(kv.Value) != string(want[i].Value) {
+			t.Fatalf("pair %d = {%s,%s}, want {%s,%s}", i, kv.Key, kv.Value, want[i].Key, want[i].Value)
+		}
+	}
+
+	deleted, err := db.Range("k20", "k20", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted key k20 should not appear: %v", deleted)
+	}
+
+	limited, err := db.Range("k00", "k59", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 3 || limited[0].Key != "k00" || limited[2].Key != "k02" {
+		t.Fatalf("limit not honored in order: %v", limited)
+	}
+	db.Close()
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
