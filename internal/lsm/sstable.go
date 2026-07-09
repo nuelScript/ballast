@@ -9,15 +9,15 @@ import (
 	"sort"
 )
 
-// SSTable layout: sorted data entries, then a sparse index (every Nth key ->
-// offset), then the bloom filter, then a fixed footer pointing at both.
+// SSTable layout: version-sorted data entries, then a sparse index (every Nth
+// key -> offset), then the bloom filter, then a fixed footer.
 //
-//	entry:  keyLen(4) | key | kind(1) | valLen(4) | value
-//	footer: bloomOffset(8) | bloomLen(8) | indexOffset(8) | indexLen(8) | magic(8)
+//	entry:  keyLen(4) | key | seq(8) | kind(1) | valLen(4) | value
+//	footer: bloomOffset(8) | bloomLen(8) | indexOffset(8) | indexLen(8) | maxSeq(8) | magic(8)
 const (
 	indexInterval   = 16
 	bloomBitsPerKey = 10
-	footerSize      = 40
+	footerSize      = 48
 	sstMagic        = uint64(0x62616c6c61737431)
 )
 
@@ -27,9 +27,11 @@ type indexEntry struct {
 }
 
 func encodeEntry(e kvEntry) []byte {
-	buf := make([]byte, 4+len(e.key)+1+4+len(e.value))
+	buf := make([]byte, 4+len(e.key)+8+1+4+len(e.value))
 	binary.LittleEndian.PutUint32(buf, uint32(len(e.key)))
 	n := 4 + copy(buf[4:], e.key)
+	binary.LittleEndian.PutUint64(buf[n:], e.seq)
+	n += 8
 	buf[n] = e.kind
 	n++
 	binary.LittleEndian.PutUint32(buf[n:], uint32(len(e.value)))
@@ -43,13 +45,15 @@ func decodeEntry(buf []byte, off int) (kvEntry, int) {
 	off += 4
 	key := string(buf[off : off+kl])
 	off += kl
+	seq := binary.LittleEndian.Uint64(buf[off:])
+	off += 8
 	kind := buf[off]
 	off++
 	vl := int(binary.LittleEndian.Uint32(buf[off:]))
 	off += 4
 	val := append([]byte(nil), buf[off:off+vl]...)
 	off += vl
-	return kvEntry{key, kind, val}, off
+	return kvEntry{key, seq, kind, val}, off
 }
 
 type countingWriter struct {
@@ -63,7 +67,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return m, err
 }
 
-func writeSSTable(path string, entries []kvEntry) error {
+// writeSSTable writes entries (already sorted key asc, seq desc). seqStamp is
+// recorded in the footer so recovery can restore the sequence counter even if
+// compaction later drops the entry that held the highest seq.
+func writeSSTable(path string, entries []kvEntry, seqStamp uint64) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -112,7 +119,8 @@ func writeSSTable(path string, entries []kvEntry) error {
 	binary.LittleEndian.PutUint64(footer[8:], uint64(bloomLen))
 	binary.LittleEndian.PutUint64(footer[16:], uint64(indexOffset))
 	binary.LittleEndian.PutUint64(footer[24:], uint64(indexLen))
-	binary.LittleEndian.PutUint64(footer[32:], sstMagic)
+	binary.LittleEndian.PutUint64(footer[32:], seqStamp)
+	binary.LittleEndian.PutUint64(footer[40:], sstMagic)
 	if _, err := cw.Write(footer); err != nil {
 		f.Close()
 		return err
@@ -135,6 +143,7 @@ type sstable struct {
 	index   []indexEntry
 	bloom   *bloom
 	dataEnd int64
+	maxSeq  uint64
 }
 
 func openSSTable(path string, id uint32) (*sstable, error) {
@@ -158,7 +167,7 @@ func openSSTable(path string, id uint32) (*sstable, error) {
 		f.Close()
 		return nil, err
 	}
-	if binary.LittleEndian.Uint64(footer[32:]) != sstMagic {
+	if binary.LittleEndian.Uint64(footer[40:]) != sstMagic {
 		f.Close()
 		return nil, fmt.Errorf("sstable %s bad magic", path)
 	}
@@ -166,6 +175,7 @@ func openSSTable(path string, id uint32) (*sstable, error) {
 	bloomLen := int64(binary.LittleEndian.Uint64(footer[8:]))
 	indexOffset := int64(binary.LittleEndian.Uint64(footer[16:]))
 	indexLen := int64(binary.LittleEndian.Uint64(footer[24:]))
+	maxSeq := binary.LittleEndian.Uint64(footer[32:])
 
 	idxBuf := make([]byte, indexLen)
 	if _, err := f.ReadAt(idxBuf, indexOffset); err != nil {
@@ -191,22 +201,32 @@ func openSSTable(path string, id uint32) (*sstable, error) {
 		return nil, err
 	}
 
-	return &sstable{id: id, f: f, index: index, bloom: decodeBloom(bloomBuf), dataEnd: indexOffset}, nil
+	return &sstable{id: id, f: f, index: index, bloom: decodeBloom(bloomBuf), dataEnd: indexOffset, maxSeq: maxSeq}, nil
 }
 
-func (s *sstable) get(key string) (kvEntry, bool, error) {
-	if !s.bloom.mayContain(key) {
-		return kvEntry{}, false, nil
-	}
-	// Largest indexed key <= target bounds the one block that could hold it.
-	i := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > key }) - 1
+// blockRange returns the byte region [start,end) of the blocks that could hold
+// keys in [lo,hi], from the sparse index.
+func (s *sstable) blockRange(lo, hi string) (int64, int64) {
+	i := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > lo }) - 1
 	if i < 0 {
-		return kvEntry{}, false, nil
+		i = 0
 	}
 	start := s.index[i].offset
 	end := s.dataEnd
-	if i+1 < len(s.index) {
-		end = s.index[i+1].offset
+	if j := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > hi }); j < len(s.index) {
+		end = s.index[j].offset
+	}
+	return start, end
+}
+
+// get returns the newest version of key with seq <= maxSeq.
+func (s *sstable) get(key string, maxSeq uint64) (kvEntry, bool, error) {
+	if !s.bloom.mayContain(key) || len(s.index) == 0 {
+		return kvEntry{}, false, nil
+	}
+	start, end := s.blockRange(key, key)
+	if end <= start {
+		return kvEntry{}, false, nil
 	}
 	buf := make([]byte, end-start)
 	if _, err := s.f.ReadAt(buf, start); err != nil {
@@ -214,38 +234,30 @@ func (s *sstable) get(key string) (kvEntry, bool, error) {
 	}
 	for off := 0; off < len(buf); {
 		e, next := decodeEntry(buf, off)
-		if e.key == key {
-			return e, true, nil
+		off = next
+		if e.key < key {
+			continue
 		}
 		if e.key > key {
 			break
 		}
-		off = next
+		if e.seq <= maxSeq { // entries are seq desc, so this is the newest visible
+			return e, true, nil
+		}
 	}
 	return kvEntry{}, false, nil
 }
 
-// rangeEntries returns the entries with start <= key <= end, in key order. It
-// reads only the blocks the sparse index says could hold that range.
 func (s *sstable) rangeEntries(start, end string) ([]kvEntry, error) {
 	if len(s.index) == 0 {
 		return nil, nil
 	}
-	lo := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > start }) - 1
-	if lo < 0 {
-		lo = 0
-	}
-	startOff := s.index[lo].offset
-	endOff := s.dataEnd
-	if hi := sort.Search(len(s.index), func(i int) bool { return s.index[i].key > end }); hi < len(s.index) {
-		endOff = s.index[hi].offset
-	}
-	if endOff <= startOff {
+	lo, hi := s.blockRange(start, end)
+	if hi <= lo {
 		return nil, nil
 	}
-
-	buf := make([]byte, endOff-startOff)
-	if _, err := s.f.ReadAt(buf, startOff); err != nil {
+	buf := make([]byte, hi-lo)
+	if _, err := s.f.ReadAt(buf, lo); err != nil {
 		return nil, err
 	}
 	var out []kvEntry

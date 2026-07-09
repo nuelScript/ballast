@@ -17,6 +17,18 @@ those that cannot hold the key. Data survives a restart (including `kill -9`),
 and `COMPACT` merges the SSTables to reclaim space from overwritten and deleted
 keys.
 
+Every write carries a sequence number and keys keep multiple versions, so a
+transaction reads a consistent snapshot taken at `BEGIN`:
+
+```sh
+> BEGIN
+OK
+> SET balance 100
+OK
+> COMMIT           # atomic; fails if another client wrote these keys first
+OK
+```
+
 ## Try it
 
 ```sh
@@ -33,7 +45,8 @@ OK
 
 ## Commands
 
-`PING`, `ECHO`, `SET`, `GET`, `DEL`, `RANGE start end [LIMIT n]`, `COMPACT`, `QUIT`.
+`PING`, `ECHO`, `SET`, `GET`, `DEL`, `RANGE start end [LIMIT n]`, `COMPACT`,
+`BEGIN`, `COMMIT`, `ROLLBACK`, `QUIT`.
 
 `RANGE` returns the key/value pairs with `start <= key <= end`, in key order —
 merged across the memtable and every SSTable.

@@ -43,6 +43,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	r := resp.NewReader(conn)
 	w := resp.NewWriter(conn)
+	sess := &session{}
+	defer func() {
+		if sess.txn != nil {
+			sess.txn.Rollback() // release the snapshot if the client vanished mid-txn
+		}
+	}()
 	for {
 		args, err := r.ReadCommand()
 		if err != nil {
@@ -55,7 +61,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		if err := handleCommand(w, s.store, args); err != nil {
+		if err := handleCommand(w, s.store, sess, args); err != nil {
 			if !errors.Is(err, errQuit) {
 				return
 			}

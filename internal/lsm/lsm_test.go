@@ -1,6 +1,7 @@
 package lsm
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,11 +39,10 @@ func TestSSTableReadPath(t *testing.T) {
 	// More than indexInterval entries so the sparse index has multiple blocks.
 	var entries []kvEntry
 	for i := 0; i < 100; i++ {
-		entries = append(entries, kvEntry{fmt.Sprintf("k%03d", i), kindPut, []byte(fmt.Sprintf("v%03d", i))})
+		entries = append(entries, kvEntry{fmt.Sprintf("k%03d", i), 1, kindPut, []byte(fmt.Sprintf("v%03d", i))})
 	}
-	entries[50].kind = kindTombstone
-	entries[50].value = nil
-	if err := writeSSTable(path, entries); err != nil {
+	entries[50] = kvEntry{"k050", 1, kindTombstone, nil}
+	if err := writeSSTable(path, entries, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -53,7 +53,7 @@ func TestSSTableReadPath(t *testing.T) {
 	defer s.f.Close()
 
 	for i := 0; i < 100; i++ {
-		e, ok, err := s.get(fmt.Sprintf("k%03d", i))
+		e, ok, err := s.get(fmt.Sprintf("k%03d", i), ^uint64(0))
 		if err != nil || !ok {
 			t.Fatalf("k%03d: ok=%v err=%v", i, ok, err)
 		}
@@ -67,8 +67,106 @@ func TestSSTableReadPath(t *testing.T) {
 			t.Fatalf("k%03d = %q", i, e.value)
 		}
 	}
-	if _, ok, _ := s.get("absent"); ok {
+	if _, ok, _ := s.get("absent", ^uint64(0)); ok {
 		t.Fatal("absent key returned present")
+	}
+}
+
+func TestTransactionSnapshotIsolation(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.Set("k", []byte("v1"))
+	txn := db.Begin() // snapshots the world at v1
+	db.Set("k", []byte("v2"))
+
+	if v, ok, _ := txn.Get("k"); !ok || string(v) != "v1" {
+		t.Fatalf("txn saw %q (ok=%v), want v1", v, ok)
+	}
+	if v, _, _ := db.Get("k"); string(v) != "v2" {
+		t.Fatalf("db saw %q, want v2", v)
+	}
+	txn.Rollback()
+}
+
+func TestTransactionOwnWritesAndCommit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	txn := db.Begin()
+	txn.Set("a", []byte("x"))
+	if v, ok, _ := txn.Get("a"); !ok || string(v) != "x" {
+		t.Fatalf("txn should see its own write, got %q ok=%v", v, ok)
+	}
+	if _, ok, _ := db.Get("a"); ok {
+		t.Fatal("uncommitted write must not be visible outside the txn")
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok, _ := db.Get("a"); !ok || string(v) != "x" {
+		t.Fatalf("after commit db = %q ok=%v, want x", v, ok)
+	}
+}
+
+func TestTransactionConflict(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.Set("k", []byte("v0"))
+	t1 := db.Begin()
+	t2 := db.Begin() // both snapshot v0
+
+	t1.Set("k", []byte("t1"))
+	if err := t1.Commit(); err != nil {
+		t.Fatalf("t1 commit: %v", err)
+	}
+	t2.Set("k", []byte("t2"))
+	if err := t2.Commit(); !errors.Is(err, ErrConflict) {
+		t.Fatalf("t2 commit = %v, want ErrConflict", err)
+	}
+	if v, _, _ := db.Get("k"); string(v) != "t1" {
+		t.Fatalf("k = %q, want t1 (the winner)", v)
+	}
+}
+
+func TestMergePreservesHeldSnapshot(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.Set("k", []byte("old"))
+	db.flush() // "old" lands in an SSTable
+	snap := db.Begin()
+	db.Set("k", []byte("new"))
+	db.flush() // "new" in a second SSTable
+
+	// Merge while the snapshot is held: the old version must be retained.
+	if err := db.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok, _ := snap.Get("k"); !ok || string(v) != "old" {
+		t.Fatalf("snapshot lost its version after merge: %q ok=%v", v, ok)
+	}
+	snap.Rollback()
+
+	// With no snapshot held, a merge collapses to the newest version.
+	if err := db.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := db.Get("k"); string(v) != "new" {
+		t.Fatalf("after final merge = %q, want new", v)
 	}
 }
 

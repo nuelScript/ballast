@@ -1,9 +1,6 @@
 package lsm
 
-import (
-	"slices"
-	"strings"
-)
+import "slices"
 
 const (
 	kindPut       byte = 0
@@ -12,48 +9,73 @@ const (
 
 type kvEntry struct {
 	key   string
+	seq   uint64
 	kind  byte
 	value []byte
 }
 
+// entryLess orders entries by key ascending, then sequence descending, so the
+// newest version of a key sorts first.
+func entryLess(a, b kvEntry) int {
+	if a.key != b.key {
+		if a.key < b.key {
+			return -1
+		}
+		return 1
+	}
+	switch {
+	case a.seq > b.seq:
+		return -1
+	case a.seq < b.seq:
+		return 1
+	default:
+		return 0
+	}
+}
+
 type memtable struct {
-	data map[string]kvEntry
+	data map[string][]kvEntry // versions per key, appended in ascending seq
 	size int
 }
 
 func newMemtable() *memtable {
-	return &memtable{data: make(map[string]kvEntry)}
+	return &memtable{data: make(map[string][]kvEntry)}
 }
 
-func (m *memtable) put(key string, kind byte, value []byte) {
-	if old, ok := m.data[key]; ok {
-		m.size -= len(old.key) + len(old.value)
-	}
-	m.data[key] = kvEntry{key, kind, value}
+func (m *memtable) put(key string, seq uint64, kind byte, value []byte) {
+	m.data[key] = append(m.data[key], kvEntry{key, seq, kind, value})
 	m.size += len(key) + len(value)
 }
 
-func (m *memtable) get(key string) (kvEntry, bool) {
-	e, ok := m.data[key]
-	return e, ok
+// get returns the newest version of key with seq <= maxSeq.
+func (m *memtable) get(key string, maxSeq uint64) (kvEntry, bool) {
+	versions := m.data[key]
+	for i := len(versions) - 1; i >= 0; i-- {
+		if versions[i].seq <= maxSeq {
+			return versions[i], true
+		}
+	}
+	return kvEntry{}, false
 }
 
+func (m *memtable) empty() bool { return len(m.data) == 0 }
+
 func (m *memtable) sorted() []kvEntry {
-	out := make([]kvEntry, 0, len(m.data))
-	for _, e := range m.data {
-		out = append(out, e)
+	out := make([]kvEntry, 0, m.size)
+	for _, vs := range m.data {
+		out = append(out, vs...)
 	}
-	slices.SortFunc(out, func(a, b kvEntry) int { return strings.Compare(a.key, b.key) })
+	slices.SortFunc(out, entryLess)
 	return out
 }
 
 func (m *memtable) rangeEntries(start, end string) []kvEntry {
 	var out []kvEntry
-	for _, e := range m.data {
-		if e.key >= start && e.key <= end {
-			out = append(out, e)
+	for k, vs := range m.data {
+		if k >= start && k <= end {
+			out = append(out, vs...)
 		}
 	}
-	slices.SortFunc(out, func(a, b kvEntry) int { return strings.Compare(a.key, b.key) })
+	slices.SortFunc(out, entryLess)
 	return out
 }

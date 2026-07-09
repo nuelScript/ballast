@@ -3,7 +3,9 @@ package server
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -124,4 +126,105 @@ func readFull(r *bufio.Reader, buf []byte) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// startServer runs one Server backed by a fresh engine and returns its address.
+func startServer(t *testing.T) string {
+	t.Helper()
+	db, err := lsm.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go New("", db).Serve(ln)
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().String()
+}
+
+// tclient is a tiny RESP client that sends a command and returns its reply as a
+// string: "+OK", "-ERR ...", ":1", the bulk body, or "(nil)".
+type tclient struct {
+	t    *testing.T
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+func dialClient(t *testing.T, addr string) *tclient {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	return &tclient{t: t, conn: conn, r: bufio.NewReader(conn)}
+}
+
+func (c *tclient) cmd(parts ...string) string {
+	c.t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "*%d\r\n", len(parts))
+	for _, p := range parts {
+		fmt.Fprintf(&b, "$%d\r\n%s\r\n", len(p), p)
+	}
+	if _, err := c.conn.Write([]byte(b.String())); err != nil {
+		c.t.Fatal(err)
+	}
+	line, err := c.r.ReadString('\n')
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if line[0] == '$' {
+		n, _ := strconv.Atoi(line[1:])
+		if n < 0 {
+			return "(nil)"
+		}
+		body := make([]byte, n+2)
+		if _, err := io.ReadFull(c.r, body); err != nil {
+			c.t.Fatal(err)
+		}
+		return string(body[:n])
+	}
+	return line
+}
+
+func TestTransactionsOverRESP(t *testing.T) {
+	addr := startServer(t)
+	c1 := dialClient(t, addr)
+	c2 := dialClient(t, addr)
+
+	// Snapshot isolation: c1's transaction does not see c2's later write.
+	c1.cmd("SET", "k", "v0")
+	if r := c1.cmd("BEGIN"); r != "+OK" {
+		t.Fatalf("BEGIN = %s", r)
+	}
+	c2.cmd("SET", "k", "v2")
+	if r := c1.cmd("GET", "k"); r != "v0" {
+		t.Fatalf("in-txn GET = %s, want v0", r)
+	}
+	if r := c2.cmd("GET", "k"); r != "v2" {
+		t.Fatalf("outside GET = %s, want v2", r)
+	}
+	c1.cmd("COMMIT")
+
+	// Write-write conflict: the second committer loses.
+	c1.cmd("SET", "x", "0")
+	c1.cmd("BEGIN")
+	c2.cmd("BEGIN")
+	c1.cmd("SET", "x", "a")
+	if r := c1.cmd("COMMIT"); r != "+OK" {
+		t.Fatalf("c1 COMMIT = %s", r)
+	}
+	c2.cmd("SET", "x", "b")
+	if r := c2.cmd("COMMIT"); r != "-ERR transaction conflict" {
+		t.Fatalf("c2 COMMIT = %s, want conflict", r)
+	}
+	if r := c1.cmd("GET", "x"); r != "a" {
+		t.Fatalf("x = %s, want a", r)
+	}
 }
