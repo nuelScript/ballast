@@ -10,6 +10,21 @@ go run ./cmd/ballast                       # :6379, data in ./ballast-data
 go run ./cmd/ballast -addr :7000 -dir /var/lib/ballast
 ```
 
+### Cluster
+
+Run several nodes that replicate through Raft; writes go to the leader and
+survive a node failing. Each node takes its own Raft address and the full node
+list as `raftAddr=clientAddr` pairs:
+
+```sh
+go run ./cmd/ballast -addr 127.0.0.1:6401 -dir n1 -raft 127.0.0.1:7001 \
+  -cluster 127.0.0.1:7001=127.0.0.1:6401,127.0.0.1:7002=127.0.0.1:6402,127.0.0.1:7003=127.0.0.1:6403
+# ...and the same for n2 (:7002/:6402) and n3 (:7003/:6403).
+```
+
+Writing to a follower returns the leader's address; reads are served locally.
+Transactions are single-node only.
+
 Writes go to a write-ahead log and an in-memory memtable; when the memtable
 fills it is flushed to an immutable, sorted SSTable on disk. Reads check the
 memtable, then the SSTables newest-first, using a per-table bloom filter to skip

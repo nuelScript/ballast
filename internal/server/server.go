@@ -6,16 +6,23 @@ import (
 	"log"
 	"net"
 
+	"github.com/nuelScript/ballast/internal/lsm"
+	"github.com/nuelScript/ballast/internal/raft"
 	"github.com/nuelScript/ballast/internal/resp"
 )
 
 type Server struct {
-	addr  string
-	store Store
+	addr string
+	db   *lsm.DB
+
+	// Set only in cluster mode: writes go through Raft, and redirect maps a Raft
+	// node id to the client address to point followers' clients at.
+	raft     *raft.Node
+	redirect map[string]string
 }
 
-func New(addr string, store Store) *Server {
-	return &Server{addr: addr, store: store}
+func New(addr string, db *lsm.DB) *Server {
+	return &Server{addr: addr, db: db}
 }
 
 func (s *Server) ListenAndServe() error {
@@ -61,7 +68,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		if err := handleCommand(w, s.store, sess, args); err != nil {
+		if err := handleCommand(w, s, sess, args); err != nil {
 			if !errors.Is(err, errQuit) {
 				return
 			}

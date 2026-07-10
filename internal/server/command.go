@@ -11,30 +11,12 @@ import (
 
 var errQuit = errors.New("client quit")
 
-type Store interface {
-	Get(key string) ([]byte, bool, error)
-	Set(key string, value []byte) error
-	Delete(keys ...string) (int, error)
-}
-
-type merger interface {
-	Merge() error
-}
-
-type scanner interface {
-	Range(start, end string, limit int) ([]lsm.KV, error)
-}
-
-type transactor interface {
-	Begin() *lsm.Txn
-}
-
 // session is the per-connection state: the transaction in progress, if any.
 type session struct {
 	txn *lsm.Txn
 }
 
-func handleCommand(w *resp.Writer, store Store, sess *session, args [][]byte) error {
+func handleCommand(w *resp.Writer, s *Server, sess *session, args [][]byte) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -42,7 +24,7 @@ func handleCommand(w *resp.Writer, store Store, sess *session, args [][]byte) er
 
 	switch name {
 	case "BEGIN":
-		return cmdBegin(w, store, sess)
+		return cmdBegin(w, s, sess)
 	case "COMMIT":
 		return cmdCommit(w, sess)
 	case "ROLLBACK":
@@ -69,15 +51,18 @@ func handleCommand(w *resp.Writer, store Store, sess *session, args [][]byte) er
 	case "ECHO":
 		return cmdEcho(w, args)
 	case "SET":
-		return cmdSet(w, store, args)
+		return cmdSet(w, s, args)
 	case "GET":
-		return cmdGet(w, store, args)
+		return cmdGet(w, s, args)
 	case "DEL":
-		return cmdDel(w, store, args)
+		return cmdDel(w, s, args)
 	case "RANGE":
-		return cmdRange(w, store, args)
+		return cmdRange(w, s, args)
 	case "COMPACT":
-		return cmdCompact(w, store)
+		if err := s.db.Merge(); err != nil {
+			return w.WriteError("ERR " + err.Error())
+		}
+		return w.WriteSimpleString("OK")
 	case "COMMAND":
 		// redis-cli probes COMMAND DOCS on connect; an empty array keeps it happy.
 		return w.WriteArray(0)
@@ -95,15 +80,23 @@ func handleCommand(w *resp.Writer, store Store, sess *session, args [][]byte) er
 	}
 }
 
-func cmdBegin(w *resp.Writer, store Store, sess *session) error {
+// writeErr turns a leadership redirect into a client-visible pointer to the leader.
+func writeErr(w *resp.Writer, err error) error {
+	var re redirectErr
+	if errors.As(err, &re) {
+		return w.WriteError("ERR not leader; leader at " + re.addr)
+	}
+	return w.WriteError("ERR " + err.Error())
+}
+
+func cmdBegin(w *resp.Writer, s *Server, sess *session) error {
+	if s.raft != nil {
+		return w.WriteError("ERR transactions are not available in cluster mode")
+	}
 	if sess.txn != nil {
 		return w.WriteError("ERR already in a transaction")
 	}
-	tr, ok := store.(transactor)
-	if !ok {
-		return w.WriteError("ERR transactions not supported")
-	}
-	sess.txn = tr.Begin()
+	sess.txn = s.db.Begin()
 	return w.WriteSimpleString("OK")
 }
 
@@ -186,21 +179,21 @@ func cmdEcho(w *resp.Writer, args [][]byte) error {
 	return w.WriteBulk(args[1])
 }
 
-func cmdSet(w *resp.Writer, store Store, args [][]byte) error {
+func cmdSet(w *resp.Writer, s *Server, args [][]byte) error {
 	if len(args) != 3 {
 		return w.WriteError("ERR wrong number of arguments for 'set' command")
 	}
-	if err := store.Set(string(args[1]), args[2]); err != nil {
-		return w.WriteError("ERR " + err.Error())
+	if _, err := s.write([][]byte{[]byte("SET"), args[1], args[2]}); err != nil {
+		return writeErr(w, err)
 	}
 	return w.WriteSimpleString("OK")
 }
 
-func cmdGet(w *resp.Writer, store Store, args [][]byte) error {
+func cmdGet(w *resp.Writer, s *Server, args [][]byte) error {
 	if len(args) != 2 {
 		return w.WriteError("ERR wrong number of arguments for 'get' command")
 	}
-	v, ok, err := store.Get(string(args[1]))
+	v, ok, err := s.db.Get(string(args[1]))
 	if err != nil {
 		return w.WriteError("ERR " + err.Error())
 	}
@@ -210,29 +203,22 @@ func cmdGet(w *resp.Writer, store Store, args [][]byte) error {
 	return w.WriteBulk(v)
 }
 
-func cmdDel(w *resp.Writer, store Store, args [][]byte) error {
+func cmdDel(w *resp.Writer, s *Server, args [][]byte) error {
 	if len(args) < 2 {
 		return w.WriteError("ERR wrong number of arguments for 'del' command")
 	}
-	keys := make([]string, 0, len(args)-1)
-	for _, k := range args[1:] {
-		keys = append(keys, string(k))
-	}
-	n, err := store.Delete(keys...)
+	res, err := s.write(append([][]byte{[]byte("DEL")}, args[1:]...))
 	if err != nil {
-		return w.WriteError("ERR " + err.Error())
+		return writeErr(w, err)
 	}
+	n, _ := res.(int)
 	return w.WriteInteger(int64(n))
 }
 
 // RANGE start end [LIMIT n] returns key/value pairs with start <= key <= end.
-func cmdRange(w *resp.Writer, store Store, args [][]byte) error {
+func cmdRange(w *resp.Writer, s *Server, args [][]byte) error {
 	if len(args) != 3 && len(args) != 5 {
 		return w.WriteError("ERR wrong number of arguments for 'range' command")
-	}
-	sc, ok := store.(scanner)
-	if !ok {
-		return w.WriteError("ERR range not supported")
 	}
 	limit := 0
 	if len(args) == 5 {
@@ -245,7 +231,7 @@ func cmdRange(w *resp.Writer, store Store, args [][]byte) error {
 		}
 		limit = n
 	}
-	pairs, err := sc.Range(string(args[1]), string(args[2]), limit)
+	pairs, err := s.db.Range(string(args[1]), string(args[2]), limit)
 	if err != nil {
 		return w.WriteError("ERR " + err.Error())
 	}
@@ -261,15 +247,4 @@ func cmdRange(w *resp.Writer, store Store, args [][]byte) error {
 		}
 	}
 	return nil
-}
-
-func cmdCompact(w *resp.Writer, store Store) error {
-	m, ok := store.(merger)
-	if !ok {
-		return w.WriteError("ERR compaction not supported")
-	}
-	if err := m.Merge(); err != nil {
-		return w.WriteError("ERR " + err.Error())
-	}
-	return w.WriteSimpleString("OK")
 }
